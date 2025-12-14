@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# CatBoost
+catboost_info/
+
+# Logs
+logs/
+*.log
+
+# Models (large files - regenerate via training)
+models/
+*.cbm
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.zip
+
+# Data cache (can be re-downloaded)
+data/cache/
+data/storage/
+data/*.csv
+data/*.parquet
+*.parquet
+
+# Environment and secrets
+.env
+.env.local
+*.env
+api_key*.txt
+credentials*.json
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
