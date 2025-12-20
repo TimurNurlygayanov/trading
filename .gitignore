@@ -63,9 +63,12 @@ models/
 # Data cache (can be re-downloaded)
 data/cache/
 data/storage/
+data_cache/
+data_cache_eodhd/
 data/*.csv
 data/*.parquet
 *.parquet
+*.json
 
 # Environment and secrets
 .env
