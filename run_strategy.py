@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Momentum + Fundamentals Strategy - EODHD ONLY
+Momentum + Fundamentals Strategy with Academic Enhancements
 
-This version uses only EODHD API for both price and fundamental data.
-No Polygon/Massive API required.
+Data sources: Polygon (prices) + EODHD (fundamentals)
 
 Features:
 - Quarterly rebalancing
 - Top 20 stocks by CatBoost prediction
 - Transaction costs included
 - Can be used for backtesting and live trading signals
+
+Academic Enhancements (from research):
+- Residual Momentum (Blitz et al. 2011): Market-neutral momentum that doubles Sharpe
+- Volatility-Adjusted Returns: Sharpe-like risk-adjusted returns
+- Near 52-Week High (George & Hwang 2004): Anchoring effect predictor
+- Quality Score: Combined ROE/ROA/margin metric from QVM research
+- Momentum Consistency: Positive returns across all timeframes
 """
 
 import os
@@ -25,6 +31,7 @@ import pandas as pd
 import numpy as np
 import requests
 from catboost import CatBoostClassifier
+from tqdm import tqdm
 
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -129,10 +136,8 @@ class PolygonClient:
             with ThreadPoolExecutor(max_workers=20) as executor:
                 futures = {executor.submit(fetch_one, s): s for s in to_fetch}
 
-                for i, future in enumerate(as_completed(futures)):
-                    if (i + 1) % 50 == 0:
-                        print(f"    Progress: {i + 1}/{len(to_fetch)}")
-
+                for future in tqdm(as_completed(futures), total=len(to_fetch),
+                                   desc="    Fetching prices", unit="stock"):
                     symbol, df = future.result()
                     if df is not None and len(df) > 100:
                         results[symbol] = df
@@ -326,25 +331,38 @@ class EODHDClient:
                 print(f"  Estimated time: ~{est_minutes:.1f} minutes (rate limited to ~800/min)")
 
             # Sequential with rate limiting to respect API limits
-            for i, symbol in enumerate(to_fetch):
+            for symbol in tqdm(to_fetch, desc="    Fetching fundamentals", unit="stock"):
                 data = self.get_fundamentals(symbol)
                 if data:
                     results[symbol] = data
-
-                if (i + 1) % 100 == 0:
-                    print(f"    Progress: {i + 1}/{len(to_fetch)} ({self.api_calls} API calls)")
 
         return results
 
 
 def get_feature_columns():
-    """Feature columns for the ML model."""
+    """Feature columns for the ML model.
+
+    Includes academic enhancements:
+    - residual_momentum: Blitz et al. (2011) - doubles Sharpe ratio
+    - momentum_consistency: positive momentum across all timeframes
+    - volatility_adjusted_return: Sharpe-like metric
+    - near_52w_high: George & Hwang (2004) 52-week high anchor
+    - quality_score: Combined ROE/ROA/margin metric
+
+    Debt/Leverage features:
+    - beta: Market risk (volatility relative to market)
+    - debt_to_equity: Leverage ratio (lower is safer)
+    - debt_to_assets: Asset leverage ratio
+    - short_ratio: Short interest ratio
+    """
     return [
+        # Base momentum features
         'return_21d', 'return_63d', 'return_126d', 'return_252d',
         'volatility_21d', 'volatility_63d',
         'dist_from_high', 'dist_from_low',
         'price_to_sma_20', 'price_to_sma_50', 'price_to_sma_200',
         'rsi_14', 'volume_ratio', 'trend_strength',
+        # Fundamental features
         'eps', 'eps_estimate_current', 'eps_estimate_next', 'eps_growth_expected',
         'pe_ratio', 'peg_ratio', 'forward_pe',
         'profit_margin', 'roe', 'roa',
@@ -353,13 +371,27 @@ def get_feature_columns():
         'dividend_yield',
         'last_earnings_surprise', 'avg_earnings_surprise',
         'days_since_earnings', 'log_market_cap',
+        # Debt/Leverage features
+        'beta', 'debt_to_equity', 'debt_to_assets', 'short_ratio',
+        # Enhanced academic features
+        'residual_momentum_21d', 'residual_momentum_63d',
+        'volatility_adjusted_return', 'near_52w_high',
+        'quality_score', 'momentum_consistency',
     ]
 
 
-def calculate_momentum_features(prices: pd.DataFrame) -> pd.DataFrame:
-    """Calculate momentum features. NO FUTURE LEAKS."""
+def calculate_momentum_features(prices: pd.DataFrame, spy_returns: pd.Series = None) -> pd.DataFrame:
+    """Calculate momentum features. NO FUTURE LEAKS.
+
+    Includes academic enhancements:
+    - Residual momentum (Blitz et al.)
+    - Momentum consistency
+    - Volatility-adjusted return
+    - Near 52-week high indicator
+    """
     df = prices.copy()
 
+    # Base momentum returns
     for lookback in [21, 63, 126, 252]:
         df[f'return_{lookback}d'] = df['adjusted_close'].pct_change(lookback).shift(5)
 
@@ -388,11 +420,64 @@ def calculate_momentum_features(prices: pd.DataFrame) -> pd.DataFrame:
 
     df['trend_strength'] = abs(df['return_63d']) / (df['volatility_63d'] + 1e-10)
 
+    # === ENHANCED ACADEMIC FEATURES ===
+
+    # Volatility-adjusted return (Sharpe-like)
+    df['volatility_adjusted_return'] = df['return_63d'] / (df['volatility_63d'] + 0.01)
+
+    # Near 52-week high (George & Hwang 2004)
+    df['near_52w_high'] = (df['dist_from_high'] < 0.10).astype(float)
+
+    # Momentum consistency (positive across all timeframes)
+    df['momentum_consistency'] = (
+        (df['return_21d'] > 0).astype(float) +
+        (df['return_63d'] > 0).astype(float) +
+        (df['return_126d'] > 0).astype(float) +
+        (df['return_252d'] > 0).astype(float)
+    ) / 4.0
+
+    # Residual momentum (Blitz et al. 2011) - requires market returns
+    # Uses vectorized rolling operations for O(n) performance instead of O(n²)
+    df['residual_momentum_21d'] = 0.0
+    df['residual_momentum_63d'] = 0.0
+
+    if spy_returns is not None:
+        stock_returns = df['adjusted_close'].pct_change()
+        common_idx = stock_returns.index.intersection(spy_returns.index)
+
+        if len(common_idx) >= 100:
+            stock_ret = stock_returns.loc[common_idx]
+            mkt_ret = spy_returns.loc[common_idx]
+
+            # Vectorized rolling beta calculation (60-day window)
+            rolling_cov = stock_ret.rolling(60).cov(mkt_ret)
+            rolling_var = mkt_ret.rolling(60).var()
+            rolling_beta = rolling_cov / (rolling_var + 1e-10)
+
+            # Rolling cumulative returns
+            stock_ret_21d = stock_ret.rolling(21).sum()
+            stock_ret_63d = stock_ret.rolling(63).sum()
+            mkt_ret_21d = mkt_ret.rolling(21).sum()
+            mkt_ret_63d = mkt_ret.rolling(63).sum()
+
+            # Residual momentum = stock_return - beta * market_return
+            residual_21d = stock_ret_21d - rolling_beta * mkt_ret_21d
+            residual_63d = stock_ret_63d - rolling_beta * mkt_ret_63d
+
+            # Map back to original index
+            df.loc[residual_21d.index, 'residual_momentum_21d'] = residual_21d.values
+            df.loc[residual_63d.index, 'residual_momentum_63d'] = residual_63d.values
+
     return df
 
 
 def extract_fundamentals(fund_data: dict, as_of_date: datetime = None) -> dict:
-    """Extract fundamental features from EODHD data."""
+    """Extract fundamental features from EODHD data.
+
+    Includes:
+    - Quality score based on QVM research (Quality-Value-Momentum)
+    - Debt/Leverage features (beta, debt ratios, short interest)
+    """
     features = {}
     as_of_date = as_of_date or datetime.now()
 
@@ -409,6 +494,54 @@ def extract_fundamentals(fund_data: dict, as_of_date: datetime = None) -> dict:
     features['earnings_growth'] = highlights.get('QuarterlyEarningsGrowthYOY')
     features['market_cap'] = highlights.get('MarketCapitalization')
     features['dividend_yield'] = highlights.get('DividendYield')
+
+    # Debt/Leverage features from Technicals
+    technicals = fund_data.get('Technicals', {})
+    features['beta'] = technicals.get('Beta') or 1.0  # Default to market beta
+    features['short_ratio'] = technicals.get('ShortRatio') or 0
+
+    # Debt ratios from Balance Sheet
+    financials = fund_data.get('Financials', {})
+    balance_sheet = financials.get('Balance_Sheet', {}).get('quarterly', {})
+    if balance_sheet:
+        # Get most recent quarter
+        latest_bs = list(balance_sheet.values())[0] if balance_sheet else {}
+
+        # Convert string values to float
+        def to_float(val):
+            try:
+                return float(val) if val else 0
+            except (ValueError, TypeError):
+                return 0
+
+        total_liab = to_float(latest_bs.get('totalLiab'))
+        total_assets = to_float(latest_bs.get('totalAssets')) or 1
+        stockholder_equity = to_float(latest_bs.get('totalStockholderEquity'))
+
+        # Debt-to-Equity ratio (cap at 10 to avoid outliers)
+        if stockholder_equity > 0:
+            features['debt_to_equity'] = min(total_liab / stockholder_equity, 10)
+        else:
+            features['debt_to_equity'] = 10  # High leverage if negative equity
+
+        # Debt-to-Assets ratio
+        if total_assets > 0:
+            features['debt_to_assets'] = total_liab / total_assets
+        else:
+            features['debt_to_assets'] = 1
+    else:
+        features['debt_to_equity'] = 0
+        features['debt_to_assets'] = 0
+
+    # Quality score (QVM research) - combines ROE, ROA, profit margin
+    roe = features['roe'] or 0
+    roa = features['roa'] or 0
+    margin = features['profit_margin'] or 0
+    features['quality_score'] = (
+        min(max(roe, 0), 0.5) / 0.5 * 0.4 +
+        min(max(roa, 0), 0.2) / 0.2 * 0.3 +
+        min(max(margin, 0), 0.3) / 0.3 * 0.3
+    )
 
     if features['eps'] and features['eps_estimate_next']:
         try:
@@ -600,6 +733,10 @@ def get_next_trades(eodhd_client: EODHDClient, polygon_client: PolygonClient, mo
     prices = polygon_client.fetch_prices_parallel(valid_symbols, start_date, end_date)
     print(f"  Got prices for: {len(prices)} symbols")
 
+    # Get SPY for residual momentum
+    spy_df = polygon_client.get_prices('SPY', start_date, end_date)
+    spy_returns = spy_df['adjusted_close'].pct_change() if len(spy_df) > 0 else None
+
     # Build features for today
     rows = []
     for symbol in prices.keys():
@@ -613,7 +750,7 @@ def get_next_trades(eodhd_client: EODHDClient, polygon_client: PolygonClient, mo
             continue
 
         try:
-            momentum_df = calculate_momentum_features(price_df)
+            momentum_df = calculate_momentum_features(price_df, spy_returns)
             latest = momentum_df.iloc[-1]
 
             fund_features = extract_fundamentals(fund_data, today)
@@ -626,10 +763,16 @@ def get_next_trades(eodhd_client: EODHDClient, polygon_client: PolygonClient, mo
                 'close': latest.get('adjusted_close', latest.get('close')),
             }
 
+            # Base momentum features
             for col in ['return_21d', 'return_63d', 'return_126d', 'return_252d',
                        'volatility_21d', 'volatility_63d', 'dist_from_high', 'dist_from_low',
                        'price_to_sma_20', 'price_to_sma_50', 'price_to_sma_200',
                        'rsi_14', 'volume_ratio', 'trend_strength']:
+                row[col] = latest.get(col, 0)
+
+            # Enhanced academic features
+            for col in ['residual_momentum_21d', 'residual_momentum_63d',
+                       'volatility_adjusted_return', 'near_52w_high', 'momentum_consistency']:
                 row[col] = latest.get(col, 0)
 
             for key, value in fund_features.items():
@@ -770,9 +913,16 @@ def main():
 
     print(f"  Train periods: {len(sampled_train_dates)}, Test periods: {len(test_dates)}")
 
+    # Calculate SPY returns for residual momentum
+    spy_df = prices.get('SPY')
+    spy_returns = None
+    if spy_df is not None:
+        spy_returns = spy_df['adjusted_close'].pct_change()
+
     # Build dataset
     all_rows = []
-    for date in sampled_train_dates + test_dates:
+    all_periods = sampled_train_dates + test_dates
+    for date in tqdm(all_periods, desc="  Building features", unit="period"):
         for symbol in prices.keys():
             if symbol not in fundamentals or symbol == 'SPY':
                 continue
@@ -785,7 +935,8 @@ def main():
                 continue
 
             try:
-                momentum_df = calculate_momentum_features(price_filtered)
+                # Pass SPY returns for residual momentum calculation
+                momentum_df = calculate_momentum_features(price_filtered, spy_returns)
                 latest = momentum_df.iloc[-1]
 
                 fund_features = extract_fundamentals(fund_data, date)
@@ -798,10 +949,16 @@ def main():
                     'close': latest.get('adjusted_close', latest.get('close')),
                 }
 
+                # Base momentum features
                 for col in ['return_21d', 'return_63d', 'return_126d', 'return_252d',
                            'volatility_21d', 'volatility_63d', 'dist_from_high', 'dist_from_low',
                            'price_to_sma_20', 'price_to_sma_50', 'price_to_sma_200',
                            'rsi_14', 'volume_ratio', 'trend_strength']:
+                    row[col] = latest.get(col, 0)
+
+                # Enhanced academic features
+                for col in ['residual_momentum_21d', 'residual_momentum_63d',
+                           'volatility_adjusted_return', 'near_52w_high', 'momentum_consistency']:
                     row[col] = latest.get(col, 0)
 
                 for key, value in fund_features.items():
@@ -817,8 +974,10 @@ def main():
     print(f"  Total samples: {len(feature_df)}")
 
     # Forward returns
+    print("  Calculating forward returns...")
     forward_returns = []
-    for _, row in feature_df.iterrows():
+    for _, row in tqdm(feature_df.iterrows(), total=len(feature_df),
+                       desc="  Forward returns", unit="sample"):
         symbol = row['symbol']
         current_date = row['date']
         current_price = row['close']
@@ -857,14 +1016,14 @@ def main():
     X_tr, X_val = X_train[:-val_size], X_train[-val_size:]
     y_tr, y_val = y_train[:-val_size], y_train[-val_size:]
 
-    print(f"\n  Training CatBoost (d=10, lr=0.0005)...")
+    print(f"\n  Training CatBoost (d=10, lr=0.0005, up to 30k iterations)...")
     model = CatBoostClassifier(
         iterations=30000,
         depth=10,
         learning_rate=0.0005,
         auto_class_weights='Balanced',
         random_state=42,
-        verbose=False,
+        verbose=1000,  # Show progress every 1000 iterations
         early_stopping_rounds=500,
         use_best_model=True,
     )

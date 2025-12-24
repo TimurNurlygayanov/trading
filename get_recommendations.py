@@ -13,7 +13,7 @@ This will:
 1. Load the trained CatBoost model
 2. Fetch FRESH price data from Polygon (always up-to-date)
 3. Use cached fundamentals from EODHD (if fetched this month)
-4. Generate top 20 stock recommendations
+4. Generate top 5 stock recommendations
 5. Save recommendations to a JSON file
 """
 
@@ -38,7 +38,7 @@ from run_strategy import (
 )
 
 
-def get_recommendations(top_n: int = 20) -> list:
+def get_recommendations(top_n: int = 5) -> list:
     """Get current stock recommendations using saved model."""
 
     # Check for saved model
@@ -94,6 +94,10 @@ def get_recommendations(top_n: int = 20) -> list:
     prices = polygon_client.fetch_prices_parallel(valid_symbols, start_date, end_date, force_refresh=True)
     print(f"  Got fresh prices for: {len(prices)} symbols")
 
+    # Get SPY for residual momentum calculation
+    spy_df = polygon_client.get_prices('SPY', start_date, end_date, force_refresh=True)
+    spy_returns = spy_df['adjusted_close'].pct_change() if len(spy_df) > 0 else None
+
     # Build features for today
     rows = []
     for symbol in prices.keys():
@@ -107,7 +111,7 @@ def get_recommendations(top_n: int = 20) -> list:
             continue
 
         try:
-            momentum_df = calculate_momentum_features(price_df)
+            momentum_df = calculate_momentum_features(price_df, spy_returns)
             latest = momentum_df.iloc[-1]
 
             fund_features = extract_fundamentals(fund_data, today)
@@ -120,10 +124,16 @@ def get_recommendations(top_n: int = 20) -> list:
                 'close': latest.get('adjusted_close', latest.get('close')),
             }
 
+            # Base momentum features
             for col in ['return_21d', 'return_63d', 'return_126d', 'return_252d',
                        'volatility_21d', 'volatility_63d', 'dist_from_high', 'dist_from_low',
                        'price_to_sma_20', 'price_to_sma_50', 'price_to_sma_200',
                        'rsi_14', 'volume_ratio', 'trend_strength']:
+                row[col] = latest.get(col, 0)
+
+            # Enhanced academic features
+            for col in ['residual_momentum_21d', 'residual_momentum_63d',
+                       'volatility_adjusted_return', 'near_52w_high', 'momentum_consistency']:
                 row[col] = latest.get(col, 0)
 
             for key, value in fund_features.items():
@@ -177,7 +187,7 @@ def get_recommendations(top_n: int = 20) -> list:
     print(f"{'='*60}")
     print(f"  Stocks: {top_n}")
     print(f"  Weight per stock: {100/top_n:.1f}%")
-    print(f"  Strategy: Equal weight, hold for 3 months")
+    print(f"  Strategy: Equal weight, cut losers every 3 months")
     print(f"  Next rebalance: ~{(today + timedelta(days=90)).strftime('%Y-%m-%d')}")
 
     # Save to file
