@@ -297,10 +297,11 @@ class EODHDClient:
 
         return results
 
-    def fetch_fundamentals_parallel(self, symbols: list) -> dict:
+    def fetch_fundamentals_parallel(self, symbols: list, use_cache_only: bool = False) -> dict:
         """Fetch fundamentals for multiple symbols with rate limiting.
 
         Uses smart caching: only refetch if cache is from a previous month.
+        If use_cache_only=True, uses any cached data regardless of age.
         """
         import os
         results = {}
@@ -311,6 +312,11 @@ class EODHDClient:
             cache_file = CACHE_DIR / f"fund_{symbol}.json"
             if cache_file.exists():
                 try:
+                    # If use_cache_only, accept any cached data
+                    if use_cache_only:
+                        with open(cache_file) as f:
+                            results[symbol] = json.load(f)
+                            continue
                     # Check if cache is from current month
                     cache_mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
                     if cache_mtime.year == now.year and cache_mtime.month == now.month:
@@ -321,6 +327,10 @@ class EODHDClient:
                 except:
                     pass
             to_fetch.append(symbol)
+
+        if use_cache_only:
+            print(f"  Fundamentals: {len(results)} from cache, {len(to_fetch)} missing (skipped)")
+            return results  # Don't fetch, just return cached data
 
         print(f"  Fundamentals: {len(results)} fresh (this month), {len(to_fetch)} to fetch/refresh")
 
@@ -472,67 +482,195 @@ def calculate_momentum_features(prices: pd.DataFrame, spy_returns: pd.Series = N
 
 
 def extract_fundamentals(fund_data: dict, as_of_date: datetime = None) -> dict:
-    """Extract fundamental features from EODHD data.
+    """Extract fundamental features from EODHD data using HISTORICAL data only.
 
-    Includes:
-    - Quality score based on QVM research (Quality-Value-Momentum)
-    - Debt/Leverage features (beta, debt ratios, short interest)
+    IMPORTANT: Uses only data that was available as of as_of_date to avoid
+    future leakage in backtesting.
+
+    Historical data sources:
+    - EPS: from Earnings.History (quarterly reports)
+    - ROE, ROA, profit_margin: calculated from historical financials
+    - Debt ratios: from Balance_Sheet.quarterly filtered by date
     """
     features = {}
     as_of_date = as_of_date or datetime.now()
+    as_of_str = as_of_date.strftime('%Y-%m-%d')
 
-    highlights = fund_data.get('Highlights', {})
-    features['eps'] = highlights.get('EarningsShare')
-    features['eps_estimate_current'] = highlights.get('EPSEstimateCurrentYear')
-    features['eps_estimate_next'] = highlights.get('EPSEstimateNextYear')
-    features['pe_ratio'] = highlights.get('PERatio')
-    features['peg_ratio'] = highlights.get('PEGRatio')
-    features['profit_margin'] = highlights.get('ProfitMargin')
-    features['roe'] = highlights.get('ReturnOnEquityTTM')
-    features['roa'] = highlights.get('ReturnOnAssetsTTM')
-    features['revenue_growth'] = highlights.get('QuarterlyRevenueGrowthYOY')
-    features['earnings_growth'] = highlights.get('QuarterlyEarningsGrowthYOY')
-    features['market_cap'] = highlights.get('MarketCapitalization')
-    features['dividend_yield'] = highlights.get('DividendYield')
+    def to_float(val):
+        """Convert string values to float safely."""
+        try:
+            return float(val) if val else 0
+        except (ValueError, TypeError):
+            return 0
 
-    # Debt/Leverage features from Technicals
-    technicals = fund_data.get('Technicals', {})
-    features['beta'] = technicals.get('Beta') or 1.0  # Default to market beta
-    features['short_ratio'] = technicals.get('ShortRatio') or 0
+    # =========================================================================
+    # HISTORICAL EPS from Earnings.History (TTM = sum of last 4 quarters)
+    # =========================================================================
+    earnings = fund_data.get('Earnings', {})
+    history = earnings.get('History', {})
 
-    # Debt ratios from Balance Sheet
+    # Filter earnings by as_of_date (only reports that existed at that time)
+    valid_earnings = []
+    for date_str, data in sorted(history.items(), reverse=True):
+        # Report date is when the earnings were actually announced
+        report_date_str = data.get('reportDate') or date_str
+        if report_date_str <= as_of_str:
+            if data.get('epsActual') is not None:
+                valid_earnings.append((date_str, data))
+
+    # Calculate TTM EPS (sum of last 4 quarters)
+    if len(valid_earnings) >= 4:
+        ttm_eps = sum(to_float(e[1].get('epsActual')) for e in valid_earnings[:4])
+        features['eps'] = ttm_eps
+    elif len(valid_earnings) >= 1:
+        # If we have fewer than 4 quarters, use annualized
+        avg_quarterly_eps = np.mean([to_float(e[1].get('epsActual')) for e in valid_earnings])
+        features['eps'] = avg_quarterly_eps * 4
+    else:
+        features['eps'] = None
+
+    # Earnings surprise from most recent report
+    if valid_earnings:
+        latest_date, latest = valid_earnings[0]
+        features['last_earnings_surprise'] = latest.get('surprisePercent', 0) or 0
+        surprises = [e[1].get('surprisePercent', 0) or 0 for e in valid_earnings[:4]]
+        features['avg_earnings_surprise'] = np.mean(surprises)
+
+        try:
+            report_date = pd.to_datetime(latest.get('reportDate') or latest_date)
+            features['days_since_earnings'] = (as_of_date - report_date).days
+        except:
+            features['days_since_earnings'] = 999
+    else:
+        features['last_earnings_surprise'] = 0
+        features['avg_earnings_surprise'] = 0
+        features['days_since_earnings'] = 999
+
+    # =========================================================================
+    # HISTORICAL FINANCIALS from Balance_Sheet and Income_Statement
+    # =========================================================================
     financials = fund_data.get('Financials', {})
+
+    # Get historical balance sheet (filter by as_of_date)
     balance_sheet = financials.get('Balance_Sheet', {}).get('quarterly', {})
-    if balance_sheet:
-        # Get most recent quarter
-        latest_bs = list(balance_sheet.values())[0] if balance_sheet else {}
+    valid_bs = {}
+    for date_str, data in balance_sheet.items():
+        # Add ~45 days buffer for quarterly report filing
+        try:
+            bs_date = datetime.strptime(date_str, '%Y-%m-%d')
+            # Companies typically file 10-Q within 45 days
+            filing_date = bs_date + timedelta(days=45)
+            if filing_date <= as_of_date:
+                valid_bs[date_str] = data
+        except:
+            pass
 
-        # Convert string values to float
-        def to_float(val):
-            try:
-                return float(val) if val else 0
-            except (ValueError, TypeError):
-                return 0
+    # Get historical income statement (filter by as_of_date)
+    income_stmt = financials.get('Income_Statement', {}).get('quarterly', {})
+    valid_is = {}
+    for date_str, data in income_stmt.items():
+        try:
+            is_date = datetime.strptime(date_str, '%Y-%m-%d')
+            filing_date = is_date + timedelta(days=45)
+            if filing_date <= as_of_date:
+                valid_is[date_str] = data
+        except:
+            pass
 
-        total_liab = to_float(latest_bs.get('totalLiab'))
-        total_assets = to_float(latest_bs.get('totalAssets')) or 1
+    # Calculate ROE, ROA, profit margin from historical data
+    if valid_bs and valid_is:
+        # Get most recent available quarter
+        latest_bs_date = max(valid_bs.keys())
+        latest_is_date = max(valid_is.keys())
+        latest_bs = valid_bs[latest_bs_date]
+        latest_is = valid_is[latest_is_date]
+
         stockholder_equity = to_float(latest_bs.get('totalStockholderEquity'))
+        total_assets = to_float(latest_bs.get('totalAssets')) or 1
+        total_liab = to_float(latest_bs.get('totalLiab'))
+        net_income = to_float(latest_is.get('netIncome'))
+        total_revenue = to_float(latest_is.get('totalRevenue')) or 1
+
+        # Annualize quarterly net income for ratio calculations
+        annual_net_income = net_income * 4
+
+        # ROE = Net Income / Stockholder Equity
+        if stockholder_equity > 0:
+            features['roe'] = annual_net_income / stockholder_equity
+        else:
+            features['roe'] = 0
+
+        # ROA = Net Income / Total Assets
+        if total_assets > 0:
+            features['roa'] = annual_net_income / total_assets
+        else:
+            features['roa'] = 0
+
+        # Profit Margin = Net Income / Revenue
+        if total_revenue > 0:
+            features['profit_margin'] = net_income / total_revenue
+        else:
+            features['profit_margin'] = 0
 
         # Debt-to-Equity ratio (cap at 10 to avoid outliers)
         if stockholder_equity > 0:
             features['debt_to_equity'] = min(total_liab / stockholder_equity, 10)
         else:
-            features['debt_to_equity'] = 10  # High leverage if negative equity
+            features['debt_to_equity'] = 10
 
         # Debt-to-Assets ratio
-        if total_assets > 0:
-            features['debt_to_assets'] = total_liab / total_assets
+        features['debt_to_assets'] = total_liab / total_assets if total_assets > 0 else 1
+
+        # Calculate revenue growth YoY from historical data
+        sorted_is_dates = sorted(valid_is.keys(), reverse=True)
+        if len(sorted_is_dates) >= 5:  # Need 4 quarters ago
+            current_q = valid_is[sorted_is_dates[0]]
+            year_ago_q = valid_is[sorted_is_dates[4]]
+            current_rev = to_float(current_q.get('totalRevenue'))
+            year_ago_rev = to_float(year_ago_q.get('totalRevenue'))
+            if year_ago_rev > 0:
+                features['revenue_growth'] = (current_rev - year_ago_rev) / year_ago_rev
+            else:
+                features['revenue_growth'] = 0
         else:
-            features['debt_to_assets'] = 1
+            features['revenue_growth'] = 0
+
+        # Calculate earnings growth YoY
+        if len(sorted_is_dates) >= 5:
+            current_q = valid_is[sorted_is_dates[0]]
+            year_ago_q = valid_is[sorted_is_dates[4]]
+            current_ni = to_float(current_q.get('netIncome'))
+            year_ago_ni = to_float(year_ago_q.get('netIncome'))
+            if year_ago_ni > 0:
+                features['earnings_growth'] = (current_ni - year_ago_ni) / year_ago_ni
+            else:
+                features['earnings_growth'] = 0
+        else:
+            features['earnings_growth'] = 0
     else:
+        features['roe'] = 0
+        features['roa'] = 0
+        features['profit_margin'] = 0
         features['debt_to_equity'] = 0
         features['debt_to_assets'] = 0
+        features['revenue_growth'] = 0
+        features['earnings_growth'] = 0
 
+    # =========================================================================
+    # STATIC DATA (these don't change much, acceptable to use current)
+    # =========================================================================
+    highlights = fund_data.get('Highlights', {})
+    features['market_cap'] = highlights.get('MarketCapitalization')
+    features['dividend_yield'] = highlights.get('DividendYield')
+
+    # Beta and short ratio from Technicals (relatively stable)
+    technicals = fund_data.get('Technicals', {})
+    features['beta'] = technicals.get('Beta') or 1.0
+    features['short_ratio'] = technicals.get('ShortRatio') or 0
+
+    # =========================================================================
+    # DERIVED FEATURES (calculated from historical data)
+    # =========================================================================
     # Quality score (QVM research) - combines ROE, ROA, profit margin
     roe = features['roe'] or 0
     roa = features['roa'] or 0
@@ -543,49 +681,19 @@ def extract_fundamentals(fund_data: dict, as_of_date: datetime = None) -> dict:
         min(max(margin, 0), 0.3) / 0.3 * 0.3
     )
 
-    if features['eps'] and features['eps_estimate_next']:
-        try:
-            features['eps_growth_expected'] = (
-                features['eps_estimate_next'] - features['eps']
-            ) / abs(features['eps'] + 1e-10)
-        except:
-            features['eps_growth_expected'] = None
-    else:
-        features['eps_growth_expected'] = None
+    # P/E ratio - cannot be calculated without price, set to None
+    # (will be filled in by caller if needed)
+    features['pe_ratio'] = None
+    features['peg_ratio'] = None
+    features['forward_pe'] = None
+    features['price_to_book'] = None
+    features['price_to_sales'] = None
 
-    valuation = fund_data.get('Valuation', {})
-    features['forward_pe'] = valuation.get('ForwardPE')
-    features['price_to_book'] = valuation.get('PriceBookMRQ')
-    features['price_to_sales'] = valuation.get('PriceSalesTTM')
-
-    # Earnings history
-    earnings = fund_data.get('Earnings', {})
-    if 'History' in earnings:
-        history = earnings['History']
-        recent = []
-        for date_str, data in sorted(history.items(), reverse=True)[:4]:
-            if data.get('epsActual') is not None:
-                recent.append((date_str, data))
-
-        if recent:
-            latest_date, latest = recent[0]
-            features['last_earnings_surprise'] = latest.get('surprisePercent', 0) or 0
-            surprises = [e[1].get('surprisePercent', 0) or 0 for e in recent]
-            features['avg_earnings_surprise'] = np.mean(surprises)
-
-            try:
-                report_date = pd.to_datetime(latest.get('reportDate') or latest_date)
-                features['days_since_earnings'] = (as_of_date - report_date).days
-            except:
-                features['days_since_earnings'] = 999
-        else:
-            features['last_earnings_surprise'] = 0
-            features['avg_earnings_surprise'] = 0
-            features['days_since_earnings'] = 999
-    else:
-        features['last_earnings_surprise'] = 0
-        features['avg_earnings_surprise'] = 0
-        features['days_since_earnings'] = 999
+    # EPS estimates are forward-looking, so we can't use them in backtest
+    # (they weren't available at that time with the same values)
+    features['eps_estimate_current'] = None
+    features['eps_estimate_next'] = None
+    features['eps_growth_expected'] = None
 
     return features
 
@@ -848,7 +956,8 @@ def main():
     print("\n[2/6] Fetching fundamentals for ALL stocks...")
     print(f"  This may take a while for {len(symbols)} symbols...")
 
-    fundamentals = eodhd_client.fetch_fundamentals_parallel(symbols)
+    # Use cached fundamentals for backtesting (no need to refresh)
+    fundamentals = eodhd_client.fetch_fundamentals_parallel(symbols, use_cache_only=True)
     print(f"  Got fundamentals for {len(fundamentals)} stocks")
 
     # Step 3: Filter by market cap and EPS

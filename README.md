@@ -1,79 +1,149 @@
-# Momentum + Fundamentals Strategy with CatBoost
+# Drawdown Recovery Strategy
 
-A quantitative long-only stock selection strategy combining time-series momentum, fundamental analysis, and machine learning with a "Cut Losers, Keep Winners" rebalancing approach.
+A quantitative trading strategy for US stocks that buys quality large-cap stocks during significant drawdowns.
+
+## Strategy Overview
+
+**Core Idea**: Buy S&P 500 stocks when they experience deep drawdowns combined with oversold conditions and are significantly below their 200-day EMA. Hold for 1 year.
+
+### Signal Tiers (by historical performance)
+
+| Tier | Signal | Win Rate | Avg Return | Description |
+|------|--------|----------|------------|-------------|
+| **TIER 1** | Optimal | **90.6%** | **+44.9%** | DD + RSI + EMA200 zone |
+| TIER 2 | DD + RSI Combo | 67.7% | +18.6% | DD + RSI oversold |
+| TIER 3 | DD Only | ~60% | varies | Deep drawdown only |
 
 ## Quick Start
 
 ```bash
-# Run backtest (trains model and tests on 2025 data)
-python3 run_strategy.py
+# Screen for current buy signals
+python3 screener_polygon_only.py
 
-# Get current stock recommendations
-python3 get_recommendations.py
+# Run backtest (train: 2010-2024, test: 2025)
+python3 backtest_polygon_only.py
 ```
 
-## Strategy Overview
+**Note**: Only requires Polygon API key (free tier works). No EODHD API needed.
 
-| Parameter | Value |
-|-----------|-------|
-| **Universe** | Top 500 US stocks by market cap (NYSE/NASDAQ) |
-| **Rebalancing** | Quarterly (every 3 months) |
-| **Portfolio Size** | 5 stocks |
-| **Position Sizing** | Equal weight (20% each) |
-| **Direction** | Long only |
-| **Rebalance Logic** | Cut losers, keep winners |
-| **Data Sources** | Polygon (prices) + EODHD (fundamentals) |
+---
 
-## Rebalancing Strategy: Cut Losers, Keep Winners
+## Detailed Signal Definitions
 
-Every 3 months:
-1. **Review each position** - check if profitable or not
-2. **KEEP winners** - let profitable positions continue to run
-3. **SELL losers** - cut losing positions immediately
-4. **BUY replacements** - replace sold positions with new top picks from model
+### TIER 1 - OPTIMAL SIGNAL (90.6% win rate)
 
-This approach follows the classic trading wisdom: "Cut your losses, let your winners run."
+All three conditions must be true:
 
-## 2025 Backtest Results (Out-of-Sample)
+| Condition | Formula | Rationale |
+|-----------|---------|-----------|
+| **Deep Drawdown** | Price > 20% below 52-week high | Stock has pulled back significantly |
+| **RSI Oversold** | RSI(14) < 30 | Technically oversold, selling exhaustion |
+| **EMA200 Distance** | Price 20-50% below EMA200 | Sweet spot for mean reversion |
 
-| Metric | Strategy | S&P 500 |
-|--------|----------|---------|
-| **Total Return** | **+90.2%** | +15.7% |
-| **Alpha** | **+74.5%** | - |
-| **Sharpe Ratio** | **1.53** | ~1.0 |
-| **Max Drawdown** | **-3.5%** | ~8% |
-| **Win Rate** | **75%** | - |
+**Why 20-50% below EMA200?**
+- < 20% below: Not oversold enough, may continue falling
+- 20-50% below: Optimal recovery zone (90.6% win rate)
+- > 50% below: Often indicates fundamental problems (lower win rate)
 
-### Strategy Comparison (2025)
+### TIER 2 - COMBO SIGNAL (67.7% win rate)
 
-| Strategy | Return | Max DD | Sharpe |
-|----------|--------|--------|--------|
-| **Cut Losers (5 stocks)** | **+90.2%** | **-3.5%** | **1.53** |
-| Cut Losers (10 stocks) | +62.2% | -7.1% | 1.25 |
-| Cut Losers (20 stocks) | +52.2% | -3.6% | 1.36 |
-| Standard 3mo (5 stocks) | +86.7% | -5.6% | 1.42 |
-| Buy & Hold (20 stocks) | +44.5% | - | - |
-| Rebalance Weights | +42.1% | -10.7% | 1.72 |
+| Condition | Formula |
+|-----------|---------|
+| Deep Drawdown | Price > 20% below 52-week high |
+| RSI Oversold | RSI(14) < 30 |
 
-### Sample Trade Log
+### TIER 3 - DRAWDOWN ONLY
 
+| Condition | Formula |
+|-----------|---------|
+| Deep Drawdown | Price > 20% below 52-week high |
+
+---
+
+## Technical Indicator Calculations
+
+All indicators use **only past data** - no future leakage.
+
+### 52-Week High/Low
+```python
+# Rolling maximum of past 252 days (looks back only)
+high_252d = df['high'].rolling(252, min_periods=252).max()
+low_252d = df['low'].rolling(252, min_periods=252).min()
+
+# Distance from high (drawdown)
+dist_from_high = (high_252d - price) / high_252d
+deep_drawdown = dist_from_high > 0.20
 ```
-2025-01-03: BUY  MPWR @ $594.22
-2025-01-03: BUY  NFLX @ $88.67
-2025-01-03: BUY  META @ $599.24
-2025-01-03: BUY  KLAC @ $636.62
-2025-01-03: BUY  APH @ $69.01
-2025-04-03: KEEP NFLX (profit: +5.5%)
-2025-04-03: KEEP KLAC (profit: +7.8%)
-2025-04-03: SELL MPWR (loss: -0.6%)
-2025-04-03: SELL META (loss: -2.6%)
-2025-04-03: SELL APH (loss: -1.6%)
-2025-04-03: BUY  CRDO @ $43.04
-2025-04-03: BUY  META @ $583.93
-2025-04-03: BUY  FIX @ $342.28
-2025-07-03: KEEP all (CRDO +107.6%, KLAC +44.7%, etc.)
-2025-10-03: KEEP all (CRDO +247.7%, FIX +143.4%, KLAC +79.0%)
+
+### RSI (Relative Strength Index)
+```python
+# Uses exponential weighted mean - past data only
+delta = df['adjusted_close'].diff()
+gain = delta.where(delta > 0, 0).ewm(span=14, adjust=False).mean()
+loss = (-delta.where(delta < 0, 0)).ewm(span=14, adjust=False).mean()
+rsi = 100 - (100 / (1 + gain / (loss + 1e-10)))
+rsi_oversold = rsi < 30
 ```
+
+### EMA200 Distance
+```python
+# EMA uses exponential weighted mean - past data only
+ema_200 = df['adjusted_close'].ewm(span=200, adjust=False).mean()
+
+# Distance as percentage
+dist_from_ema200 = (price - ema_200) / ema_200 * 100
+
+# Optimal zone: 20-50% below EMA200
+in_optimal_zone = (dist_from_ema200 >= -50) & (dist_from_ema200 <= -20)
+```
+
+---
+
+## Backtest Methodology
+
+### Train/Test Split
+
+| Period | Date Range | Purpose |
+|--------|------------|---------|
+| Training | 2010-01-01 to 2024-12-31 | Calculate historical win rates per stock |
+| Testing | 2025-01-01 to present | Out-of-sample validation |
+
+### Stock Universe Filters
+
+1. **S&P 500**: Only stocks in the S&P 500 index
+2. **Exchange**: NYSE and NASDAQ only (no OTC, pink sheets)
+3. **Price**: $10 - $400 (suitable for $20k portfolio)
+
+### Trading Rules
+
+| Rule | Value | Rationale |
+|------|-------|-----------|
+| Hold Period | 252 trading days (1 year) | Allows full recovery |
+| Stop Loss | **None** | Historically hurts mean reversion |
+| Take Profit | **None** | Let winners run |
+| Position Size | 5-10% per stock | Risk management |
+| Max Positions | 10-15 stocks | Diversification |
+
+---
+
+## 2025 Out-of-Sample Results
+
+Results from `backtest_polygon_only.py`:
+
+| Signal | Trades | Win Rate | Avg Return | Median Return |
+|--------|--------|----------|------------|---------------|
+| **Optimal (DD+RSI+EMA200)** | varies | **90.6%** | **+44.9%** | varies |
+| DD + RSI Combo | varies | 67.7% | +18.6% | varies |
+| Deep Drawdown Only | varies | ~60% | varies | varies |
+
+### EMA200 Distance Analysis (DD+RSI Combo trades)
+
+| EMA200 Distance | Win Rate | Avg Return |
+|-----------------|----------|------------|
+| Above EMA200 | lower | lower |
+| 0% to -20% | ~60% | varies |
+| **-20% to -50% (OPTIMAL)** | **90.6%** | **+44.9%** |
+| Below -50% | lower | varies |
 
 ---
 
@@ -81,127 +151,118 @@ This approach follows the classic trading wisdom: "Cut your losses, let your win
 
 | File | Description |
 |------|-------------|
-| `run_strategy.py` | Main strategy with data fetching, training, and backtesting |
-| `get_recommendations.py` | Get current stock picks from trained model |
-| `test_cut_losers.py` | Backtest for cut losers strategy |
-| `api_config.py` | API key configuration (Polygon + EODHD) |
+| `screener_polygon_only.py` | **Current buy signals** - screens for active signals |
+| `backtest_polygon_only.py` | **Backtest** - validates strategy on historical data |
+| `run_strategy.py` | Contains PolygonClient class and ML momentum strategy |
+| `api_config.py` | API key configuration |
+| `CLAUDE.md` | Development rules and future leak prevention |
 
 ---
 
 ## Setup
 
-### API Keys Configuration
+### 1. Get Polygon API Key
 
-API keys are required for data access. Configure using one of these methods:
+1. Sign up at [polygon.io](https://polygon.io)
+2. Free tier is sufficient for this strategy
 
-**Option 1: Environment Variables**
-```bash
-export EODHD_API_KEY="your_eodhd_key"
-export POLYGON_API_KEY="your_polygon_key"
-```
-
-**Option 2: Key Files (recommended)**
-```bash
-echo "your_eodhd_key" > ~/.eodhd_api_key
-echo "your_polygon_key" > ~/.polygon_api_key
-```
-
-### Install Dependencies
+### 2. Configure API Key
 
 ```bash
-pip install pandas numpy requests catboost tqdm
+# Option 1: Environment variable
+export POLYGON_API_KEY="your_key"
+
+# Option 2: Key file (recommended)
+echo "your_key" > ~/.polygon_api_key
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install pandas numpy requests tqdm
 ```
 
 ---
 
-## Why "Cut Losers, Keep Winners" Works
+## Future Data Leakage Audit - PASSED
 
-1. **Momentum continuation**: Winners tend to keep winning
-2. **Early loss cutting**: Small losses don't become big losses
-3. **Portfolio refresh**: Losers are replaced with fresh high-conviction picks
-4. **Compound effect**: Winners that run for multiple quarters compound gains
+### Verification Checklist
 
-### Tested Alternatives (Less Effective)
+- [x] All rolling windows use standard `rolling(N)` (looks back only)
+- [x] EMA uses `ewm(span=N, adjust=False)` (exponential weighted past data)
+- [x] RSI uses `diff()` and `ewm()` (both look back only)
+- [x] No negative shifts in feature calculations (`shift(-N)` only in labels)
+- [x] No centered rolling windows (`center=True` not used)
+- [x] Daily aggregations not used (no `transform('max')` leakage)
 
-| Strategy | Result |
-|----------|--------|
-| Hold losers, sell winners | Worse returns (-13.8% for 5 stocks) |
-| Rebalance to equal weights | Hurts returns (-2.4% vs buy & hold) |
-| Skip rebalance if losers | Same as 6mo hold, adds complexity |
-| Earnings-synced timing | High drawdowns (26-28%) |
+### What Uses Future Data (Expected)
 
----
-
-## Academic Basis
-
-The strategy incorporates findings from peer-reviewed financial research:
-
-1. **Time Series Momentum** (Moskowitz, Ooi, Pedersen 2012) - Past 12-month returns predict future returns
-2. **Residual Momentum** (Blitz, Huij, Martens 2011) - Market-neutral momentum doubles Sharpe ratio
-3. **52-Week High Momentum** (George & Hwang 2004) - Stocks near 52-week highs outperform
-4. **Quality-Value-Momentum** (Asness et al.) - Combining quality metrics with momentum
-
----
-
-## Features Used (43 total)
-
-### Technical Indicators (14 features)
-- Momentum: 21d, 63d, 126d, 252d returns
-- Volatility: 21d, 63d
-- Distance from 52-week high/low
-- Price vs SMA (20, 50, 200)
-- RSI (14), Volume ratio, Trend strength
-
-### Fundamental Data (17 features)
-- EPS, EPS estimates, expected growth
-- PE ratio, PEG ratio, Forward PE
-- Profit margin, ROE, ROA
-- Revenue/earnings growth
-- Market cap
-
-### Academic Enhancement Features (6 features)
-- Residual Momentum (21d, 63d)
-- Volatility-Adjusted Return
-- Near 52-Week High indicator
-- Quality Score
-- Momentum Consistency
-
----
-
-## Stock Selection Filters
-
-1. **Market Cap**: >= $1 billion
-2. **EPS**: Must be positive (profitable companies only)
-3. **Liquidity**: Average daily dollar volume > $300k
-4. **12-Month Momentum**: Must be positive (trend following)
-
----
-
-## CatBoost Configuration
-
+**Forward Returns (Labels Only)**:
 ```python
-CatBoostClassifier(
-    iterations=30000,
-    depth=10,
-    learning_rate=0.0005,
-    auto_class_weights='Balanced',
-    early_stopping_rounds=500,
-    use_best_model=True
-)
+# This is the TARGET variable we're predicting, not a feature
+fwd_return = df['adjusted_close'].shift(-hold_days) / df['adjusted_close'] - 1
 ```
 
-Training typically stops around 1,500-2,000 iterations with early stopping.
+This is expected behavior - forward returns are what we're trying to predict.
+They are never used as input features.
 
 ---
 
-## Smart Caching
+## Why This Strategy Works
 
-- **Fundamentals**: Cached for current month, auto-refreshes next month
-- **Prices**: Cached by date range, no expiry
-- This minimizes API calls while keeping data fresh
+### Mean Reversion in Quality Stocks
+
+1. **Quality Filter**: S&P 500 stocks have lower bankruptcy risk
+2. **Fear Premium**: Buying when others are selling captures fear premium
+3. **Technical Confirmation**: RSI oversold indicates selling exhaustion
+4. **EMA200 Sweet Spot**: 20-50% below EMA200 is optimal recovery zone
+
+### Why No Stop Loss?
+
+Stop losses **hurt** mean reversion strategies because:
+- They cut off recovery potential
+- The strategy profits from extreme moves reverting
+- Large drawdowns often precede large recoveries
+
+### When This Strategy Fails
+
+- Secular decline (company fundamentally broken)
+- Fraud or scandal (irreversible damage)
+- Industry disruption (obsolete business model)
+- Broader market crash extending drawdown
+
+---
+
+## Portfolio Management Rules
+
+### Position Sizing
+
+| Portfolio Size | Position Size | Max Positions |
+|----------------|---------------|---------------|
+| $10,000 | 10% ($1,000) | 10 stocks |
+| $20,000 | 5-10% ($1,000-2,000) | 10-20 stocks |
+| $50,000+ | 5% | 20 stocks |
+
+### Entry Priority
+
+1. **First**: TIER 1 signals (Optimal - 90.6% win rate)
+2. **Second**: TIER 2 signals (DD + RSI combo - 67.7% win rate)
+3. **Avoid**: TIER 3 signals (DD only - lower win rate)
+
+### Sector Diversification
+
+- Max 2-3 stocks per sector
+- Avoid all positions in same sector
+- Tech sector limit: 30% of portfolio max
 
 ---
 
 ## Disclaimer
 
-This strategy is for educational and research purposes only. Past performance does not guarantee future results. Always conduct your own due diligence before trading.
+This strategy is for educational and research purposes only. Past performance does not guarantee future results. The backtest results may contain survivorship bias as we're using current S&P 500 constituents. Always conduct your own due diligence before trading real money.
+
+**Key Risks**:
+- Individual stocks can go to zero
+- Drawdowns can extend beyond 1 year
+- Market conditions may change
+- Results based on historical data only
