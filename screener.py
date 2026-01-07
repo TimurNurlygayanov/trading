@@ -37,7 +37,7 @@ sys.path.insert(0, str(project_root))
 warnings.filterwarnings('ignore')
 
 from api_config import get_polygon_key
-from run_strategy import PolygonClient, CACHE_DIR
+from backtest import PolygonClient, CACHE_DIR
 
 POLYGON_API_KEY = get_polygon_key()
 

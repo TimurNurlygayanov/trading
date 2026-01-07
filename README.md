@@ -18,10 +18,10 @@ A quantitative trading strategy for US stocks that buys quality large-cap stocks
 
 ```bash
 # Screen for current buy signals
-python3 screener_polygon_only.py
+python3 screener.py
 
 # Run backtest (train: 2010-2024, test: 2025)
-python3 backtest_polygon_only.py
+python3 backtest.py
 ```
 
 **Note**: Only requires Polygon API key (free tier works). No EODHD API needed.
@@ -151,8 +151,8 @@ Results from `backtest_polygon_only.py`:
 
 | File | Description |
 |------|-------------|
-| `screener_polygon_only.py` | **Current buy signals** - screens for active signals |
-| `backtest_polygon_only.py` | **Backtest** - validates strategy on historical data |
+| `screener.py` | **Current buy signals** - screens for active signals |
+| `backtest.py` | **Backtest** - validates strategy on historical data |
 | `run_strategy.py` | Contains PolygonClient class and ML momentum strategy |
 | `api_config.py` | API key configuration |
 | `CLAUDE.md` | Development rules and future leak prevention |
