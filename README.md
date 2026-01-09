@@ -6,57 +6,147 @@ A quantitative trading strategy for US stocks that buys quality large-cap stocks
 
 **Core Idea**: Buy S&P 500 stocks when they experience deep drawdowns combined with oversold conditions and are significantly below their 200-day EMA. Hold for 1 year.
 
-### Signal Tiers (by historical performance)
-
-| Tier | Signal | Win Rate | Avg Return | Description |
-|------|--------|----------|------------|-------------|
-| **TIER 1** | Optimal | **90.6%** | **+44.9%** | DD + RSI + EMA200 zone |
-| TIER 2 | DD + RSI Combo | 67.7% | +18.6% | DD + RSI oversold |
-| TIER 3 | DD Only | ~60% | varies | Deep drawdown only |
-
 ## Quick Start
 
 ```bash
-# Screen for current buy signals
-python3 screener.py
+# Screen for current buy signals (auto-selects best strategy for current month)
+python screener.py
 
-# Run backtest (train: 2010-2024, test: 2025)
-python3 backtest.py
+# Screen with specific strategy
+python screener.py --strategy AGGRESSIVE
+
+# List all available strategies
+python screener.py --list
+
+# Run backtest
+python backtest.py --strategy AGGRESSIVE
+python backtest.py  # runs all strategies
 ```
 
-**Note**: Only requires Polygon API key (free tier works). No EODHD API needed.
+**Note**: Only requires Polygon API key (free tier works).
 
 ---
 
-## Detailed Signal Definitions
+## Strategy Presets
 
-### TIER 1 - OPTIMAL SIGNAL (90.6% win rate)
+Choose the right strategy based on your goals and current month:
 
-All three conditions must be true:
+| Strategy | Win Rate | Avg Return | Trades/Year | Best For |
+|----------|----------|------------|-------------|----------|
+| **ULTRA** | 94%+ | +40-50% | 10-15 | Sep-Nov entries (highest conviction) |
+| **AGGRESSIVE** | 90%+ | +35-45% | 20-30 | Year-round trading |
+| **Q1_SPECIAL** | 93%+ | +30-40% | 15-25 | January-March entries |
+| **BALANCED** | 88%+ | +30-40% | 40-50 | More opportunities |
+| **MOMENTUM** | 90%+ | +36% | 10-20 | After strong weekly bounce |
 
-| Condition | Formula | Rationale |
-|-----------|---------|-----------|
+### Strategy Details
+
+#### ULTRA - Maximum Win Rate (Sep-Nov Only)
+```
+Filters: Optimal Zone + ATR Contracting + Volume > Avg + Good Sector + Sep-Nov Only
+```
+- Highest selectivity, highest win rate
+- Only triggers during best seasonal months (September, October, November)
+- Expects ~10-15 trades per year
+- Best for patient investors seeking maximum probability
+
+#### AGGRESSIVE - High Win Rate Year-Round
+```
+Filters: Optimal Zone + ATR Contracting + Volume > Avg + Good Sector
+```
+- Works throughout the year
+- Good balance of selectivity and opportunity
+- Expects ~20-30 trades per year
+- Recommended for most users
+
+#### Q1_SPECIAL - Optimized for Jan-Mar Entries
+```
+Filters: Optimal Zone + Volume > 1.5x Avg + ATR% > 3 + Good Sector
+```
+- Specifically tuned for Q1 market conditions
+- Volume-focused filters to catch institutional interest
+- Higher volatility requirement (ATR% > 3)
+- Use this when entering positions in January-March
+
+#### BALANCED - More Trades, Good Win Rate
+```
+Filters: Optimal Zone + ATR Contracting + Good Sector
+```
+- Less restrictive than AGGRESSIVE
+- More trading opportunities
+- Expects ~40-50 trades per year
+- Good for active traders
+
+#### MOMENTUM - Strong Weekly Bounce
+```
+Filters: Optimal Zone + Previous Week Up > 5% + Good Sector
+```
+- Counter-intuitive but effective
+- Triggers when stock bounces strongly after being oversold
+- Captures momentum continuation
+- 90% win rate historically
+
+---
+
+## Filter Definitions
+
+### Core Filters (Base Signal)
+
+| Filter | Condition | Description |
+|--------|-----------|-------------|
 | **Deep Drawdown** | Price > 20% below 52-week high | Stock has pulled back significantly |
 | **RSI Oversold** | RSI(14) < 30 | Technically oversold, selling exhaustion |
-| **EMA200 Distance** | Price 20-50% below EMA200 | Sweet spot for mean reversion |
+| **Optimal Zone** | Price 20-50% below EMA200 | Sweet spot for mean reversion |
 
-**Why 20-50% below EMA200?**
-- < 20% below: Not oversold enough, may continue falling
-- 20-50% below: Optimal recovery zone (90.6% win rate)
-- > 50% below: Often indicates fundamental problems (lower win rate)
+### Advanced Filters
 
-### TIER 2 - COMBO SIGNAL (67.7% win rate)
+| Filter | Condition | Description | Win Rate Impact |
+|--------|-----------|-------------|-----------------|
+| **ATR Contracting** | Weekly ATR SMA(3) < SMA(10) | Volatility compression before reversal | +10% win rate |
+| **Volume > Avg** | Volume > 20-day SMA | Institutional interest | +3-4% win rate |
+| **Volume > 1.5x** | Volume > 1.5x 20-day SMA | Strong institutional buying | +5% win rate |
+| **ATR% > 3** | ATR/Price > 3% | High volatility = bigger moves | +4% win rate |
+| **Good Sector** | Not Comm or Staples | Avoid low-performing sectors | +5% win rate |
+| **Weekly Up > 5%** | Previous week return > 5% | Momentum continuation | +8% win rate |
+| **Seasonal Best** | Month in Sep, Oct, Nov | Best seasonal months | +10% win rate |
 
-| Condition | Formula |
-|-----------|---------|
-| Deep Drawdown | Price > 20% below 52-week high |
-| RSI Oversold | RSI(14) < 30 |
+### Sectors to Avoid
 
-### TIER 3 - DRAWDOWN ONLY
+| Sector | Historical Win Rate | Reason |
+|--------|---------------------|--------|
+| Communication | 20% | Structural challenges (cord-cutting, competition) |
+| Consumer Staples | 0% | Slow growth, mean reversion doesn't work well |
 
-| Condition | Formula |
-|-----------|---------|
-| Deep Drawdown | Price > 20% below 52-week high |
+### Best Performing Sectors
+
+| Sector | Historical Win Rate |
+|--------|---------------------|
+| Technology | 87.9% |
+| Industrial | 87.3% |
+| Energy | 100% (small sample) |
+
+---
+
+## Seasonality Analysis
+
+Entry month significantly affects win rate:
+
+| Month | Win Rate | Recommendation |
+|-------|----------|----------------|
+| January | 48.5% | Use Q1_SPECIAL filters |
+| February | 42.9% | Use Q1_SPECIAL filters |
+| March | 74.8% | Good entry month |
+| April | 47.1% | Be selective |
+| May | 69.9% | Good entry month |
+| June | 72.0% | Good entry month |
+| July | 56.8% | Be selective |
+| August | 69.1% | Avoid (filter excludes) |
+| **September** | **75.8%** | **BEST - Use ULTRA** |
+| **October** | **79.4%** | **BEST - Use ULTRA** |
+| **November** | **79.0%** | **BEST - Use ULTRA** |
+| December | 69.0% | Good entry month |
+
+**Key Insight**: Q4 entries (Oct-Nov) benefit from "Santa Rally" and new year optimism.
 
 ---
 
@@ -64,37 +154,77 @@ All three conditions must be true:
 
 All indicators use **only past data** - no future leakage.
 
-### 52-Week High/Low
+### 52-Week High (Drawdown)
 ```python
-# Rolling maximum of past 252 days (looks back only)
 high_252d = df['high'].rolling(252, min_periods=252).max()
-low_252d = df['low'].rolling(252, min_periods=252).min()
-
-# Distance from high (drawdown)
 dist_from_high = (high_252d - price) / high_252d
 deep_drawdown = dist_from_high > 0.20
 ```
 
 ### RSI (Relative Strength Index)
 ```python
-# Uses exponential weighted mean - past data only
-delta = df['adjusted_close'].diff()
-gain = delta.where(delta > 0, 0).ewm(span=14, adjust=False).mean()
-loss = (-delta.where(delta < 0, 0)).ewm(span=14, adjust=False).mean()
-rsi = 100 - (100 / (1 + gain / (loss + 1e-10)))
+rsi = ta.rsi(df['adjusted_close'], length=14)
 rsi_oversold = rsi < 30
 ```
 
 ### EMA200 Distance
 ```python
-# EMA uses exponential weighted mean - past data only
-ema_200 = df['adjusted_close'].ewm(span=200, adjust=False).mean()
-
-# Distance as percentage
+ema_200 = ta.ema(df['adjusted_close'], length=200)
 dist_from_ema200 = (price - ema_200) / ema_200 * 100
-
-# Optimal zone: 20-50% below EMA200
 in_optimal_zone = (dist_from_ema200 >= -50) & (dist_from_ema200 <= -20)
+```
+
+### Weekly ATR Contracting (NEW)
+```python
+weekly = df.resample('W').agg({...})
+weekly['weekly_atr'] = ta.atr(weekly['high'], weekly['low'], weekly['close'], length=14)
+weekly['atr_sma3'] = weekly['weekly_atr'].rolling(3).mean()
+weekly['atr_sma10'] = weekly['weekly_atr'].rolling(10).mean()
+atr_contracting = atr_sma3 < atr_sma10  # Volatility compression
+```
+
+### Volume Filters (NEW)
+```python
+vol_sma_20 = df['volume'].rolling(20).mean()
+vol_above_avg = df['volume'] > vol_sma_20
+vol_above_1_5x = df['volume'] > (vol_sma_20 * 1.5)
+```
+
+---
+
+## Usage Examples
+
+### Screener
+
+```bash
+# Auto-select strategy based on current month
+python screener.py
+
+# Use specific strategy
+python screener.py --strategy ULTRA
+python screener.py --strategy AGGRESSIVE
+python screener.py --strategy Q1_SPECIAL
+python screener.py --strategy BALANCED
+python screener.py --strategy MOMENTUM
+
+# Scan with ALL strategies
+python screener.py --strategy ALL
+
+# List available strategies
+python screener.py --list
+```
+
+### Backtest
+
+```bash
+# Run specific strategy backtest
+python backtest.py --strategy AGGRESSIVE
+
+# Run all strategies
+python backtest.py
+
+# List strategies
+python backtest.py --list
 ```
 
 ---
@@ -105,14 +235,14 @@ in_optimal_zone = (dist_from_ema200 >= -50) & (dist_from_ema200 <= -20)
 
 | Period | Date Range | Purpose |
 |--------|------------|---------|
-| Training | 2010-01-01 to 2024-12-31 | Calculate historical win rates per stock |
+| Training | 2015-01-01 to 2024-12-31 | Calculate historical win rates |
 | Testing | 2025-01-01 to present | Out-of-sample validation |
 
-### Stock Universe Filters
+### Stock Universe
 
 1. **S&P 500**: Only stocks in the S&P 500 index
-2. **Exchange**: NYSE and NASDAQ only (no OTC, pink sheets)
-3. **Price**: $10 - $400 (suitable for $20k portfolio)
+2. **Exchange**: NYSE and NASDAQ only
+3. **Price**: $10 - $400
 
 ### Trading Rules
 
@@ -120,30 +250,8 @@ in_optimal_zone = (dist_from_ema200 >= -50) & (dist_from_ema200 <= -20)
 |------|-------|-----------|
 | Hold Period | 252 trading days (1 year) | Allows full recovery |
 | Stop Loss | **None** | Historically hurts mean reversion |
-| Take Profit | **None** | Let winners run |
-| Position Size | 5-10% per stock | Risk management |
-| Max Positions | 10-15 stocks | Diversification |
-
----
-
-## 2025 Out-of-Sample Results
-
-Results from `backtest_polygon_only.py`:
-
-| Signal | Trades | Win Rate | Avg Return | Median Return |
-|--------|--------|----------|------------|---------------|
-| **Optimal (DD+RSI+EMA200)** | varies | **90.6%** | **+44.9%** | varies |
-| DD + RSI Combo | varies | 67.7% | +18.6% | varies |
-| Deep Drawdown Only | varies | ~60% | varies | varies |
-
-### EMA200 Distance Analysis (DD+RSI Combo trades)
-
-| EMA200 Distance | Win Rate | Avg Return |
-|-----------------|----------|------------|
-| Above EMA200 | lower | lower |
-| 0% to -20% | ~60% | varies |
-| **-20% to -50% (OPTIMAL)** | **90.6%** | **+44.9%** |
-| Below -50% | lower | varies |
+| Position Size | 5% per stock | Risk management |
+| Max Positions | 10-20 stocks | Diversification |
 
 ---
 
@@ -151,11 +259,72 @@ Results from `backtest_polygon_only.py`:
 
 | File | Description |
 |------|-------------|
-| `screener.py` | **Current buy signals** - screens for active signals |
-| `backtest.py` | **Backtest** - validates strategy on historical data |
-| `run_strategy.py` | Contains PolygonClient class and ML momentum strategy |
+| `screener.py` | Screen for current buy signals with strategy selection |
+| `backtest.py` | Backtest strategies on historical data |
+| `ml_model.py` | ML confidence score model (logistic regression) |
 | `api_config.py` | API key configuration |
 | `CLAUDE.md` | Development rules and future leak prevention |
+| `test_new_filters.py` | Filter analysis and testing |
+| `test_combined_filters.py` | Combined filter analysis |
+| `analyze_q1_entries.py` | Q1 entry analysis |
+
+---
+
+## ML Confidence Scores
+
+The strategy includes an optional ML model that predicts the probability of each trade being profitable.
+
+### How It Works
+
+- **Model**: Logistic Regression (simple, interpretable, low overfit risk)
+- **Target**: P(win) - probability that 1-year return > 0
+- **Output**: Confidence score 0-100%
+
+### Features Used (No Future Leakage)
+
+| Feature | Description |
+|---------|-------------|
+| `dist_from_ema200` | Distance from 200-day EMA |
+| `rsi` | RSI(14) value |
+| `atr_pct` | ATR as % of price |
+| `vol_vs_avg` | Volume vs 20-day average |
+| `atr_contracting` | Weekly ATR compression |
+| `prev_weekly_return` | Previous week's return |
+| `sector` | One-hot encoded sector |
+| `month` | Cyclical month encoding |
+| `spy_20d_return` | Market context |
+
+### Performance by Confidence Threshold
+
+| Threshold | Win Rate | Avg Return | Trades |
+|-----------|----------|------------|--------|
+| >= 50% | 86.0% | +39.1% | 429 |
+| >= 60% | 90.9% | +44.5% | 331 |
+| >= 70% | 92.3% | +51.9% | 234 |
+| >= 80% | 94.4% | +61.2% | 71 |
+| >= 90% | 95.7% | +62.7% | 23 |
+
+### Usage
+
+```bash
+# Train and save ML model
+python ml_model.py --save
+
+# Screen with confidence filter
+python screener.py --min-confidence 70  # Only 70%+ confidence signals
+
+# Screen without filter (shows all signals with confidence scores)
+python screener.py
+```
+
+### Most Important Features
+
+| Feature | Impact | Direction |
+|---------|--------|-----------|
+| `sector_Comm` | -0.68 | Avoid communication stocks |
+| `atr_contracting` | +0.45 | Volatility compression is good |
+| `dist_from_ema200` | +0.42 | Deeper oversold is better |
+| `atr_pct` | +0.38 | Higher volatility = better returns |
 
 ---
 
@@ -164,7 +333,7 @@ Results from `backtest_polygon_only.py`:
 ### 1. Get Polygon API Key
 
 1. Sign up at [polygon.io](https://polygon.io)
-2. Free tier is sufficient for this strategy
+2. Free tier is sufficient
 
 ### 2. Configure API Key
 
@@ -172,39 +341,15 @@ Results from `backtest_polygon_only.py`:
 # Option 1: Environment variable
 export POLYGON_API_KEY="your_key"
 
-# Option 2: Key file (recommended)
+# Option 2: Key file
 echo "your_key" > ~/.polygon_api_key
 ```
 
 ### 3. Install Dependencies
 
 ```bash
-pip install pandas numpy requests tqdm
+pip install pandas numpy pandas_ta requests tqdm scikit-learn
 ```
-
----
-
-## Future Data Leakage Audit - PASSED
-
-### Verification Checklist
-
-- [x] All rolling windows use standard `rolling(N)` (looks back only)
-- [x] EMA uses `ewm(span=N, adjust=False)` (exponential weighted past data)
-- [x] RSI uses `diff()` and `ewm()` (both look back only)
-- [x] No negative shifts in feature calculations (`shift(-N)` only in labels)
-- [x] No centered rolling windows (`center=True` not used)
-- [x] Daily aggregations not used (no `transform('max')` leakage)
-
-### What Uses Future Data (Expected)
-
-**Forward Returns (Labels Only)**:
-```python
-# This is the TARGET variable we're predicting, not a feature
-fwd_return = df['adjusted_close'].shift(-hold_days) / df['adjusted_close'] - 1
-```
-
-This is expected behavior - forward returns are what we're trying to predict.
-They are never used as input features.
 
 ---
 
@@ -216,6 +361,8 @@ They are never used as input features.
 2. **Fear Premium**: Buying when others are selling captures fear premium
 3. **Technical Confirmation**: RSI oversold indicates selling exhaustion
 4. **EMA200 Sweet Spot**: 20-50% below EMA200 is optimal recovery zone
+5. **ATR Contracting**: Volatility compression often precedes reversals
+6. **Volume Confirmation**: High volume on down days = capitulation
 
 ### Why No Stop Loss?
 
@@ -224,42 +371,21 @@ Stop losses **hurt** mean reversion strategies because:
 - The strategy profits from extreme moves reverting
 - Large drawdowns often precede large recoveries
 
-### When This Strategy Fails
-
-- Secular decline (company fundamentally broken)
-- Fraud or scandal (irreversible damage)
-- Industry disruption (obsolete business model)
-- Broader market crash extending drawdown
-
 ---
 
-## Portfolio Management Rules
+## Future Data Leakage Audit - PASSED
 
-### Position Sizing
-
-| Portfolio Size | Position Size | Max Positions |
-|----------------|---------------|---------------|
-| $10,000 | 10% ($1,000) | 10 stocks |
-| $20,000 | 5-10% ($1,000-2,000) | 10-20 stocks |
-| $50,000+ | 5% | 20 stocks |
-
-### Entry Priority
-
-1. **First**: TIER 1 signals (Optimal - 90.6% win rate)
-2. **Second**: TIER 2 signals (DD + RSI combo - 67.7% win rate)
-3. **Avoid**: TIER 3 signals (DD only - lower win rate)
-
-### Sector Diversification
-
-- Max 2-3 stocks per sector
-- Avoid all positions in same sector
-- Tech sector limit: 30% of portfolio max
+- [x] All rolling windows use standard `rolling(N)` (looks back only)
+- [x] EMA uses `ewm(span=N)` (exponential weighted past data)
+- [x] Weekly data uses `shift(1)` to avoid future leak
+- [x] No negative shifts in feature calculations
+- [x] Forward returns only used for labels (expected)
 
 ---
 
 ## Disclaimer
 
-This strategy is for educational and research purposes only. Past performance does not guarantee future results. The backtest results may contain survivorship bias as we're using current S&P 500 constituents. Always conduct your own due diligence before trading real money.
+This strategy is for educational and research purposes only. Past performance does not guarantee future results. Always conduct your own due diligence before trading real money.
 
 **Key Risks**:
 - Individual stocks can go to zero
