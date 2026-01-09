@@ -3,30 +3,27 @@
 Drawdown Recovery Screener
 
 Screens S&P 500 stocks for high-probability buy signals using the optimal
-combination of technical indicators.
+combination of technical indicators with filters.
 
-STRATEGY: Deep Drawdown + RSI Oversold + EMA200 Distance
+STRATEGY: Deep Drawdown + RSI Oversold + EMA200 Distance + Filters
 - Deep Drawdown: Price > 20% below 52-week high
 - RSI Oversold: RSI(14) < 30
 - EMA200 Distance: Price 20-50% below EMA200 (optimal zone)
+- Filters: Sector, Market Context, Volatility, Momentum, Seasonality
 
-BACKTEST RESULTS (2025 out-of-sample):
-- Optimal combo (20-50% below EMA200): 90.6% win rate, +44.9% avg return
-- DD + RSI combo: 67.7% win rate, +18.6% avg return
+BACKTEST RESULTS (2015-2024, 756 trades):
+- Optimal + Filters: 88.4% win rate, +79.5% avg return (2yr hold)
+- Optimal + Filters: 84.1% win rate, +37.5% avg return (1yr hold)
 
-NO FUTURE DATA LEAKAGE - All indicators use only past data:
-- rolling(252).max() - looks back only
-- ewm(span=14/50/200) - exponential weighted mean, past only
-- pct_change() - uses current and previous values only
+Hold period: 12 months (252 trading days)
+
+NO FUTURE DATA LEAKAGE - All indicators use only past data.
 """
 
 import sys
 from pathlib import Path
 from datetime import datetime
 import warnings
-import os
-import requests
-import pickle
 
 import pandas as pd
 import numpy as np
@@ -36,167 +33,10 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 warnings.filterwarnings('ignore')
 
-from api_config import get_polygon_key
-from backtest import PolygonClient, CACHE_DIR
-
-POLYGON_API_KEY = get_polygon_key()
-
-# Valid US exchanges
-VALID_EXCHANGES = {'XNYS', 'XNAS', 'NYSE', 'NASDAQ', 'NYQ', 'NMS', 'NGM', 'NCM'}
-
-
-def get_sp500_tickers():
-    """Get S&P 500 tickers ordered by approximate market cap."""
-    # S&P 500 ordered by approximate market cap (Jan 2025)
-    return [
-        # Mega caps (>$500B)
-        'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'BRK-B', 'AVGO', 'LLY',
-        # Large caps ($100B-$500B)
-        'JPM', 'V', 'UNH', 'XOM', 'MA', 'COST', 'HD', 'PG', 'JNJ', 'WMT',
-        'ABBV', 'NFLX', 'CRM', 'BAC', 'ORCL', 'CVX', 'MRK', 'KO', 'PEP', 'AMD',
-        'TMO', 'CSCO', 'LIN', 'ACN', 'MCD', 'ABT', 'ADBE', 'WFC', 'IBM', 'PM',
-        'GE', 'ISRG', 'NOW', 'CAT', 'QCOM', 'GS', 'TXN', 'INTU', 'VZ', 'BKNG',
-        'AXP', 'MS', 'RTX', 'SPGI', 'AMGN', 'DHR', 'NEE', 'T', 'PFE', 'BLK',
-        'HON', 'UBER', 'UNP', 'ETN', 'LOW', 'AMAT', 'COP', 'PLD', 'SYK', 'C',
-        'BX', 'SCHW', 'DE', 'BA', 'VRTX', 'BSX', 'TJX', 'ADP', 'LMT', 'BMY',
-        'GILD', 'ADI', 'PANW', 'SBUX', 'MDT', 'CB', 'MMC', 'LRCX', 'MU',
-        'CI', 'KKR', 'AMT', 'SO', 'CME', 'REGN', 'KLAC', 'DUK', 'ICE', 'INTC',
-        # Large caps ($50B-$100B)
-        'SHW', 'MDLZ', 'SNPS', 'PH', 'CDNS', 'EQIX', 'PNC', 'ZTS', 'PYPL', 'CMG',
-        'CL', 'CTAS', 'USB', 'WM', 'MCO', 'AON', 'TT', 'APH', 'ITW', 'WELL',
-        'MSI', 'TDG', 'EOG', 'CVS', 'EMR', 'MAR', 'NOC', 'MMM', 'ORLY', 'CEG',
-        'FDX', 'GD', 'HCA', 'NSC', 'ABNB', 'CSX', 'FCX', 'AJG', 'CARR', 'ROP',
-        'ECL', 'HLT', 'APD', 'BDX', 'TRV', 'PCAR', 'GM', 'OKE', 'AZO', 'DLR',
-        'SRE', 'MPC', 'PSX', 'CPRT', 'NXPI', 'AEP', 'PSA', 'JCI', 'URI', 'TFC',
-        'AFL', 'NEM', 'AIG', 'MET', 'FICO', 'SPG', 'KMI', 'FTNT', 'VLO', 'ALL',
-        'HUM', 'PCG', 'SLB', 'PAYX', 'D', 'MNST', 'CCI', 'GWW', 'FAST', 'KMB',
-        'O', 'DHI', 'MSCI', 'PRU', 'BK', 'CTVA', 'CMI', 'PWR', 'LEN', 'HES',
-        'AME', 'A', 'ODFL', 'NUE', 'RSG', 'KR', 'EXC', 'AXON', 'FANG', 'F',
-        # Mid-large caps ($20B-$50B)
-        'OTIS', 'VRSK', 'PEG', 'GIS', 'YUM', 'GEHC', 'IR', 'XEL', 'EW', 'KDP',
-        'CHTR', 'EXR', 'EA', 'MLM', 'CBRE', 'IQV', 'VMC', 'DD', 'GRMN', 'HIG',
-        'VICI', 'AVB', 'STZ', 'IDXX', 'EFX', 'ED', 'ANSS', 'WEC', 'SYY', 'RCL',
-        'XYL', 'DAL', 'WTW', 'ROK', 'PPG', 'MTD', 'HPQ', 'EBAY', 'ON', 'DXCM',
-        'TSCO', 'DOV', 'EIX', 'TROW', 'GPN', 'BRO', 'WAB', 'HAL', 'TTWO', 'FITB',
-        'KEYS', 'AWK', 'DECK', 'CHD', 'LYB', 'COF', 'HPE', 'CSGP', 'TYL', 'MTB',
-        'WMB', 'IRM', 'ETR', 'DTE', 'ES', 'MPWR', 'ACGL', 'FTV', 'HUBB', 'CCL',
-        'ADM', 'BR', 'PPL', 'WST', 'DVN', 'PHM', 'EQR', 'RJF', 'K', 'BLDR',
-        'ATO', 'NVR', 'VLTO', 'CDW', 'LH', 'ULTA', 'SBAC', 'DRI', 'TRGP', 'CINF',
-        'STT', 'WDC', 'FE', 'GEV', 'LYV', 'DOC', 'NTAP', 'LDOS', 'HOLX',
-        # Mid caps ($10B-$20B)
-        'CAH', 'MKC', 'DFS', 'EXPD', 'CLX', 'OMC', 'INVH', 'MAA', 'STE', 'PKG',
-        'NI', 'TER', 'BIIB', 'RF', 'EQT', 'WRB', 'NTRS', 'J', 'MAS', 'CNC',
-        'MOH', 'DG', 'LUV', 'IP', 'SNA', 'CF', 'BAX', 'ARE', 'HSY', 'KEY',
-        'TXT', 'ESS', 'AES', 'STLD', 'ZBRA', 'PODD', 'COO', 'PTC', 'ROL', 'DGX',
-        'CNP', 'VST', 'POOL', 'JBHT', 'TRMB', 'BBY', 'KIM', 'SWK', 'TSN', 'DLTR',
-        'AVY', 'UDR', 'IEX', 'WAT', 'GPC', 'AMCR', 'HST', 'SMCI', 'VRSN', 'NDAQ',
-        'EVRG', 'EXPE', 'CAG', 'JKHY', 'APA', 'LNT', 'BG', 'LKQ', 'L', 'MRO',
-        'TFX', 'CMS', 'CPT', 'TECH', 'EPAM', 'ALLE', 'TPR', 'UHS', 'REG', 'CFG',
-        'FFIV', 'PNR', 'BXP', 'FDS', 'EMN', 'AKAM', 'NDSN', 'PAYC', 'KHC', 'VTR',
-        'INCY', 'GL', 'CTSH', 'PNW', 'HII', 'LW', 'JNPR', 'CBOE', 'NRG', 'ALGN',
-        # Smaller S&P 500 ($5B-$10B)
-        'MGM', 'IPG', 'HRL', 'WYNN', 'CHRW', 'WY', 'TAP', 'SOLV', 'SJM', 'CRL',
-        'CTRA', 'DPZ', 'CMA', 'HSIC', 'CPB', 'FRT', 'MKTX', 'DAY', 'AIZ', 'CE',
-        'ALB', 'GNRC', 'CTLT', 'RL', 'ENPH', 'IVZ', 'QRVO', 'MTCH', 'TDY', 'FMC',
-        'NWSA', 'AOS', 'GLW', 'MRNA', 'BEN', 'SWKS', 'BWA', 'HAS', 'BIO', 'DVA',
-        'TEL', 'APTV', 'PFG', 'JBL', 'FOXA', 'AAL', 'NWS', 'NCLH', 'FOX', 'PARA',
-        'WBA', 'BBWI', 'MHK', 'IFF', 'VTRS', 'HWM', 'EL', 'WBD', 'ANET',
-        'NKE', 'UAL', 'BF-B', 'LVS', 'RMD', 'BALL', 'MOS', 'OXY', 'ADSK', 'GOOG',
-        'BKR', 'PLTR', 'CRWD', 'AMP', 'IT', 'HBAN', 'TGT', 'KMX', 'GEN',
-    ]
-
-
-def filter_us_exchange_stocks(tickers, api_key):
-    """Filter tickers to only include NYSE and NASDAQ stocks."""
-    cache_file = CACHE_DIR / 'exchange_verified_tickers.pkl'
-
-    # Check cache
-    if cache_file.exists():
-        cache_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_file))
-        if cache_age.days < 30:
-            with open(cache_file, 'rb') as f:
-                cached = pickle.load(f)
-                return [t for t in tickers if t in cached]
-
-    print("  Verifying stock exchanges via Polygon API...")
-    valid_tickers = []
-
-    for ticker in tqdm(tickers, desc="    Checking exchanges"):
-        try:
-            url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
-            resp = requests.get(url, params={'apiKey': api_key}, timeout=10)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                if 'results' in data:
-                    exchange = data['results'].get('primary_exchange', '')
-                    market = data['results'].get('market', '')
-
-                    if market == 'stocks' and exchange in VALID_EXCHANGES:
-                        valid_tickers.append(ticker)
-
-            import time
-            time.sleep(0.05)
-        except:
-            continue
-
-    with open(cache_file, 'wb') as f:
-        pickle.dump(set(valid_tickers), f)
-
-    return valid_tickers
-
-
-def calculate_signals(df):
-    """
-    Calculate buy signals. NO FUTURE DATA LEAKAGE.
-
-    All calculations use only past data:
-    - rolling(N) uses past N bars only
-    - ewm(span=N) uses exponentially weighted past data
-    - shift(1) looks back 1 bar
-    - pct_change() uses current vs previous bar
-    """
-    df = df.copy()
-
-    # Daily returns (uses only past data)
-    df['return_1d'] = df['adjusted_close'].pct_change()
-
-    # 52-week high/low (rolling looks BACK only, no future data)
-    df['high_252d'] = df['high'].rolling(252, min_periods=252).max()
-    df['low_252d'] = df['low'].rolling(252, min_periods=252).min()
-
-    # Distance from high/low (current price vs past high/low)
-    df['dist_from_high'] = (df['high_252d'] - df['adjusted_close']) / df['high_252d']
-    df['dist_from_low'] = (df['adjusted_close'] - df['low_252d']) / df['low_252d']
-
-    # Deep Drawdown Signal: Price > 20% below 52-week high
-    df['deep_drawdown'] = df['dist_from_high'] > 0.20
-
-    # RSI (exponential weighted mean uses past data only)
-    delta = df['adjusted_close'].diff()
-    gain = delta.where(delta > 0, 0).ewm(span=14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(span=14, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + gain / (loss + 1e-10)))
-    df['rsi_oversold'] = df['rsi'] < 30
-
-    # EMA indicators (exponential moving averages use past data only)
-    df['ema_50'] = df['adjusted_close'].ewm(span=50, adjust=False).mean()
-    df['ema_200'] = df['adjusted_close'].ewm(span=200, adjust=False).mean()
-
-    # Distance from EMA200 (current price vs current EMA)
-    df['dist_from_ema200'] = (df['adjusted_close'] - df['ema_200']) / df['ema_200'] * 100
-
-    # EMA200 slope (percentage change over 20 days - looks back only)
-    df['ema200_slope'] = df['ema_200'].pct_change(20) * 100
-
-    # Optimal zone: Price is 20-50% below EMA200
-    df['in_optimal_zone'] = (df['dist_from_ema200'] >= -50) & (df['dist_from_ema200'] <= -20)
-
-    # Combined signals
-    df['dd_rsi_combo'] = df['deep_drawdown'] & df['rsi_oversold']
-    df['optimal_signal'] = df['dd_rsi_combo'] & df['in_optimal_zone']
-
-    return df
+from backtest import (
+    PolygonClient, get_sp500_tickers, filter_us_exchange_stocks,
+    calculate_signals, POLYGON_API_KEY, SECTOR_MAP, BAD_SECTORS
+)
 
 
 def main():
@@ -208,6 +48,7 @@ def main():
     # Configuration
     MIN_PRICE = 10
     MAX_PRICE = 400
+    HOLD_DAYS = 252  # 12 months
 
     polygon_client = PolygonClient(POLYGON_API_KEY)
 
@@ -227,21 +68,24 @@ def main():
     start_date = (datetime.now() - pd.Timedelta(days=400)).strftime('%Y-%m-%d')
 
     prices = polygon_client.fetch_prices_parallel(universe, start_date, end_date)
-    print(f"  Got prices for {len(prices)} stocks")
+
+    # Also fetch SPY for market context filter
+    spy_df = polygon_client.get_prices('SPY', start_date, end_date)
+    print(f"  Got prices for {len(prices)} stocks + SPY")
 
     # Scan for signals
     print("\n[4/4] Scanning for buy signals...")
 
-    optimal_signals = []
-    combo_signals = []
-    dd_only_signals = []
+    optimal_filtered_signals = []  # Best tier - all filters pass
+    optimal_signals = []           # Good tier - optimal but some filters fail
+    combo_signals = []             # DD + RSI combo
 
     for symbol in tqdm(prices.keys(), desc="  Scanning"):
         df = prices[symbol]
         if len(df) < 260:
             continue
 
-        df = calculate_signals(df)
+        df = calculate_signals(df, symbol=symbol, spy_df=spy_df)
         latest = df.iloc[-1]
 
         price = latest['adjusted_close']
@@ -251,118 +95,168 @@ def main():
             continue
 
         # Check signals
-        is_deep_dd = latest.get('deep_drawdown', False)
-        is_rsi_oversold = latest.get('rsi_oversold', False)
+        is_optimal_filtered = latest.get('optimal_filtered', False)
         is_optimal = latest.get('optimal_signal', False)
         is_combo = latest.get('dd_rsi_combo', False)
 
-        if not is_deep_dd:
+        if not is_combo:
             continue
+
+        # Get filter status
+        sector = SECTOR_MAP.get(symbol, 'Other')
+        filter_sector = latest.get('filter_sector', True)
+        filter_market = latest.get('filter_market', True)
+        filter_volatility = latest.get('filter_volatility', True)
+        filter_momentum = latest.get('filter_momentum', True)
+        filter_seasonality = latest.get('filter_seasonality', True)
+
+        # Build filter status string
+        filters_passed = []
+        filters_failed = []
+        if filter_sector:
+            filters_passed.append('Sector')
+        else:
+            filters_failed.append(f'Sector({sector})')
+        if filter_market:
+            filters_passed.append('Market')
+        else:
+            filters_failed.append('Market')
+        if filter_volatility:
+            filters_passed.append('Vol')
+        else:
+            filters_failed.append('Vol')
+        if filter_momentum:
+            filters_passed.append('Mom')
+        else:
+            filters_failed.append('Mom')
+        if filter_seasonality:
+            filters_passed.append('Season')
+        else:
+            filters_failed.append('Season')
 
         signal_data = {
             'symbol': symbol,
             'price': price,
+            'sector': sector,
             'drawdown': latest['dist_from_high'] * 100,
             'rsi': latest['rsi'],
             'dist_from_ema200': latest['dist_from_ema200'],
-            'ema200_slope': latest['ema200_slope'],
-            'is_combo': is_combo,
+            'atr_pct': latest.get('atr_pct', 0),
+            'momentum_5d': latest.get('momentum_5d', 0),
+            'filters_passed': filters_passed,
+            'filters_failed': filters_failed,
             'is_optimal': is_optimal,
+            'is_optimal_filtered': is_optimal_filtered,
         }
 
-        if is_optimal:
+        if is_optimal_filtered:
+            optimal_filtered_signals.append(signal_data)
+        elif is_optimal:
             optimal_signals.append(signal_data)
-        elif is_combo:
-            combo_signals.append(signal_data)
         else:
-            dd_only_signals.append(signal_data)
+            combo_signals.append(signal_data)
 
     # Sort by distance from EMA200 (more negative = better opportunity)
+    optimal_filtered_signals.sort(key=lambda x: x['dist_from_ema200'])
     optimal_signals.sort(key=lambda x: x['dist_from_ema200'])
     combo_signals.sort(key=lambda x: x['dist_from_ema200'])
-    dd_only_signals.sort(key=lambda x: -x['drawdown'])
 
     # Display results
-    print(f"\n{'='*80}")
+    print(f"\n{'='*90}")
     print("BUY SIGNALS FOUND")
-    print(f"{'='*80}")
+    print(f"{'='*90}")
 
-    # TIER 1: Optimal signals (DD + RSI + EMA200 zone)
+    # TIER 1: Optimal + Filters (best signals)
+    if optimal_filtered_signals:
+        print(f"\n{'='*90}")
+        print(f"TIER 1: OPTIMAL + ALL FILTERS PASS ({len(optimal_filtered_signals)} stocks) <- BUY THESE")
+        print("DD + RSI + EMA200 Zone + Sector + Market + Volatility + Momentum + Seasonality")
+        print("Historical: 84% win rate, +37% avg return (1yr hold), 88% win rate (2yr hold)")
+        print(f"{'='*90}")
+        print(f"{'Symbol':<8} {'Sector':<10} {'Price':>8} {'DD%':>7} {'RSI':>6} {'EMA200':>8} {'ATR%':>6} {'Mom5d':>7}")
+        print("-" * 90)
+
+        for s in optimal_filtered_signals[:15]:
+            print(f"{s['symbol']:<8} {s['sector']:<10} ${s['price']:>6.2f} {s['drawdown']:>6.1f}% {s['rsi']:>5.1f} {s['dist_from_ema200']:>+7.1f}% {s['atr_pct']:>5.1f}% {s['momentum_5d']:>+6.1f}%")
+
+    # TIER 2: Optimal but some filters fail
     if optimal_signals:
-        print(f"\n{'='*80}")
-        print(f"TIER 1: OPTIMAL SIGNALS ({len(optimal_signals)} stocks)")
-        print("Deep Drawdown + RSI Oversold + 20-50% below EMA200")
-        print("Historical: 90.6% win rate, +44.9% avg return")
-        print(f"{'='*80}")
-        print(f"{'Symbol':<8} {'Price':>10} {'Drawdown':>10} {'RSI':>8} {'Dist EMA200':>12} {'EMA200 Slope':>12}")
-        print("-" * 80)
+        print(f"\n{'='*90}")
+        print(f"TIER 2: OPTIMAL (some filters fail) ({len(optimal_signals)} stocks)")
+        print("DD + RSI + EMA200 Zone (missing some filters)")
+        print(f"{'='*90}")
+        print(f"{'Symbol':<8} {'Sector':<10} {'Price':>8} {'DD%':>7} {'RSI':>6} {'EMA200':>8} {'Failed Filters':<25}")
+        print("-" * 90)
 
-        for s in optimal_signals[:15]:
-            print(f"{s['symbol']:<8} ${s['price']:>8.2f} {s['drawdown']:>9.1f}% {s['rsi']:>7.1f} {s['dist_from_ema200']:>+10.1f}% {s['ema200_slope']:>+10.2f}%")
+        for s in optimal_signals[:10]:
+            failed = ', '.join(s['filters_failed']) if s['filters_failed'] else 'None'
+            print(f"{s['symbol']:<8} {s['sector']:<10} ${s['price']:>6.2f} {s['drawdown']:>6.1f}% {s['rsi']:>5.1f} {s['dist_from_ema200']:>+7.1f}% {failed:<25}")
 
-    # TIER 2: Combo signals (DD + RSI but not in optimal zone)
+    # TIER 3: DD + RSI combo only
     if combo_signals:
-        print(f"\n{'='*80}")
-        print(f"TIER 2: DD + RSI COMBO ({len(combo_signals)} stocks)")
+        print(f"\n{'='*90}")
+        print(f"TIER 3: DD + RSI COMBO ({len(combo_signals)} stocks)")
         print("Deep Drawdown + RSI Oversold (not in optimal EMA200 zone)")
-        print("Historical: 67.7% win rate, +18.6% avg return")
-        print(f"{'='*80}")
-        print(f"{'Symbol':<8} {'Price':>10} {'Drawdown':>10} {'RSI':>8} {'Dist EMA200':>12}")
-        print("-" * 80)
+        print(f"{'='*90}")
+        print(f"{'Symbol':<8} {'Sector':<10} {'Price':>8} {'DD%':>7} {'RSI':>6} {'EMA200':>8}")
+        print("-" * 90)
 
         for s in combo_signals[:10]:
-            print(f"{s['symbol']:<8} ${s['price']:>8.2f} {s['drawdown']:>9.1f}% {s['rsi']:>7.1f} {s['dist_from_ema200']:>+10.1f}%")
-
-    # TIER 3: Deep drawdown only
-    if dd_only_signals:
-        print(f"\n{'='*80}")
-        print(f"TIER 3: DEEP DRAWDOWN ONLY ({len(dd_only_signals)} stocks)")
-        print("Deep Drawdown but RSI not oversold")
-        print(f"{'='*80}")
-        print(f"{'Symbol':<8} {'Price':>10} {'Drawdown':>10} {'RSI':>8} {'Dist EMA200':>12}")
-        print("-" * 80)
-
-        for s in dd_only_signals[:10]:
-            print(f"{s['symbol']:<8} ${s['price']:>8.2f} {s['drawdown']:>9.1f}% {s['rsi']:>7.1f} {s['dist_from_ema200']:>+10.1f}%")
+            print(f"{s['symbol']:<8} {s['sector']:<10} ${s['price']:>6.2f} {s['drawdown']:>6.1f}% {s['rsi']:>5.1f} {s['dist_from_ema200']:>+7.1f}%")
 
     # Summary
-    print(f"\n{'='*80}")
+    print(f"\n{'='*90}")
     print("SUMMARY")
-    print(f"{'='*80}")
+    print(f"{'='*90}")
 
-    print(f"\n  TIER 1 (Optimal): {len(optimal_signals)} stocks <- BUY THESE FIRST")
-    print(f"  TIER 2 (DD+RSI): {len(combo_signals)} stocks")
-    print(f"  TIER 3 (DD only): {len(dd_only_signals)} stocks")
-    print(f"  Total signals: {len(optimal_signals) + len(combo_signals) + len(dd_only_signals)}")
+    print(f"\n  TIER 1 (Optimal + Filters): {len(optimal_filtered_signals)} stocks <- BUY THESE FIRST")
+    print(f"  TIER 2 (Optimal, some filters fail): {len(optimal_signals)} stocks")
+    print(f"  TIER 3 (DD+RSI only): {len(combo_signals)} stocks")
+    print(f"  Total signals: {len(optimal_filtered_signals) + len(optimal_signals) + len(combo_signals)}")
+
+    # Current month warning
+    current_month = datetime.now().month
+    if current_month in [1, 8]:
+        month_name = 'January' if current_month == 1 else 'August'
+        print(f"\n  WARNING: Current month ({month_name}) has historically lower win rates!")
+        print(f"           Consider waiting or being more selective.")
 
     print(f"""
-{'='*80}
+{'='*90}
 STRATEGY GUIDE
-{'='*80}
+{'='*90}
 
-SIGNAL TIERS (by historical performance):
+SIGNAL TIERS (by historical performance 2015-2024):
 
-  TIER 1 - OPTIMAL (90.6% win rate, +44.9% avg return)
-  Conditions:
+  TIER 1 - OPTIMAL + FILTERS (84% win rate, +37% return @ 1yr hold)
+  Base Conditions:
     - Deep Drawdown: Price > 20% below 52-week high
     - RSI Oversold: RSI(14) < 30
     - EMA200 Distance: Price 20-50% below EMA200
+  Filters (all must pass):
+    - Sector: Avoid Communication & Consumer Staples
+    - Market: SPY 20-day return < 0 (weak market)
+    - Volatility: ATR% > 2%
+    - Momentum: 5-day price change < -5%
+    - Seasonality: Avoid January & August
 
-  TIER 2 - COMBO (67.7% win rate, +18.6% avg return)
-  Conditions:
-    - Deep Drawdown: Price > 20% below 52-week high
-    - RSI Oversold: RSI(14) < 30
+  TIER 2 - OPTIMAL (some filters fail)
+  Same base conditions, but some filters fail.
+  Historical win rate lower (~75-80%).
 
-  TIER 3 - DRAWDOWN ONLY (lower win rate)
-  Conditions:
-    - Deep Drawdown: Price > 20% below 52-week high
+  TIER 3 - DD+RSI COMBO
+  Only deep drawdown + RSI oversold, not in optimal EMA200 zone.
 
 PORTFOLIO RULES:
   - Price filter: ${MIN_PRICE} - ${MAX_PRICE}
-  - Hold 10-15 stocks max
-  - Position size: 5-10% per stock
-  - Hold period: 1 year
-  - No stop-loss (historically hurts performance)
+  - Hold 10-20 stocks max
+  - Position size: 5% per stock
+  - Hold period: 12 months (252 trading days)
+  - No stop-loss (historically hurts mean reversion performance)
+
+SECTORS TO AVOID:
+  - Communication (NFLX, DIS, T, VZ, etc.) - 20% historical win rate
+  - Consumer Staples (PG, KO, PEP, etc.) - 0% historical win rate
 """)
 
 
