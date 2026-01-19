@@ -56,6 +56,7 @@ def get_polygon_api_key() -> str:
         '~/.polygon_api_key',
         '~/api_key2.txt',
         '~/.config/polygon/api_key',
+        '~/Desktop/api_key.txt',
     ]:
         key = _load_key_from_file(filepath)
         if key:

@@ -1,4 +1,105 @@
-# Drawdown Recovery Strategy
+# Trading Strategies
+
+A collection of quantitative trading strategies for US stocks.
+
+---
+
+# Strategy 1: Monthly Breakout (2-Month Hold)
+
+A momentum breakout strategy that buys S&P 500 stocks breaking above previous month highs.
+
+## Strategy Overview
+
+**Core Idea**: After a green monthly candle with high volatility (ATR% > 3) and strong momentum (RSI > 55), buy when the daily close breaks above the previous month's high. Hold for 2 months.
+
+## 2025 Backtest Results
+
+| Metric | Value |
+|--------|-------|
+| **Win Rate** | 72% |
+| **Profit Factor** | 5.20 |
+| **Total Return** | +923.6% |
+| **Avg Return/Trade** | +9.24% |
+| **Trades** | 100 |
+| **Max Win** | +82.2% |
+| **Max Loss** | -27.0% |
+
+## Quick Start
+
+```bash
+# Run backtest + screener
+python monthly_breakout_2m_hold.py
+
+# Run ML-enhanced version (80% win rate)
+python monthly_breakout_ml.py
+```
+
+## Entry Rules
+
+1. **Previous Month**: Must be GREEN (close > open)
+2. **Volatility Filter**: ATR% > 3 (high volatility stocks only)
+3. **Momentum Filter**: RSI(14) > 55 (bullish momentum)
+4. **Entry Signal**: Daily candle CLOSES above previous month's high
+5. **Buy**: Next day at OPEN
+
+## Exit Rules
+
+- **Hold Period**: 2 months from entry (no SL/TP)
+- Exit at close on the day that is 2 months from entry
+
+## Alternative Configurations
+
+| Configuration | Win Rate | Total Return | Notes |
+|--------------|----------|--------------|-------|
+| 2-Month Hold (default) | 72% | +923.6% | Best risk-adjusted |
+| 1-Month Hold | 78% | +676.2% | Higher WR, lower return |
+| 5% Take Profit | 83% | +251.2% | Highest WR, capped gains |
+| 3-Month Hold | 73% | +1,131% | More return, same WR |
+| 6-Month Hold | 70% | +1,795% | Highest return |
+
+## ML Enhancement (CatBoost)
+
+Adding ML filter improves win rate from 72% to 80%:
+
+| Filter | Trades | Win Rate | PF | Return |
+|--------|--------|----------|-----|--------|
+| Base (ATR>3 + RSI>55) | 100 | 72% | 5.20 | +923.6% |
+| + ML prob >= 0.65 | 35 | **80%** | 9.29 | +375.0% |
+| + ML prob >= 0.70 | 30 | **80%** | 10.22 | +328.5% |
+
+**Top ML Features**: ATR%, 2-month momentum, body ratio, month, volume ratio
+
+## Current Watchlist
+
+Run the screener to see current signals:
+
+```bash
+python monthly_breakout_2m_hold.py
+```
+
+Example output:
+```
+>>> WATCHLIST - Pending Breakouts <<<
+Symbol     Close    Target  Distance   ATR%   RSI
+NVDA   $  186.50 $  192.69     +3.3%   3.4%    76
+MU     $  285.41 $  298.83     +4.7%   5.0%    85
+AMD    $  214.16 $  225.98     +5.5%   5.0%    69
+TSLA   $  449.72 $  498.83    +10.9%   4.0%    70
+```
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `monthly_breakout_2m_hold.py` | Main strategy with screener |
+| `monthly_breakout_ml.py` | ML-enhanced version |
+| `test_2month_hold.py` | Hold period analysis |
+| `test_volatility.py` | Volatility filter tests |
+| `test_atr_tp.py` | ATR-based take profit tests |
+
+---
+
+# Strategy 2: Drawdown Recovery (1-Year Hold)
 
 A quantitative trading strategy for US stocks that buys quality large-cap stocks during significant drawdowns.
 
